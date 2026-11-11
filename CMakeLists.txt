@@ -46,6 +46,7 @@ add_executable(sage
     src/cpu/i960.cpp
     src/cpu/i960dis.cpp
     src/cpu/sharc.cpp
+    src/cpu/tgp.cpp
     src/cpu/m68000.cpp
     src/hw/sound_board.cpp
     src/hw/scsp.cpp

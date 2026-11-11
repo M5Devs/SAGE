@@ -1,13 +1,13 @@
 #pragma once
 
-// Small shims the ported sound cores need.
+// Small shims the ported cores need.
 //
-// The SCSP and its DSP are ported nearly verbatim from MAME (via the sm2-emu
-// reference), which was written against a handful of helpers: a save-state
-// Archive, a levelled log, fixed-width integer names, sign extension and a
-// couple of float<->bits reinterpretations. Rather than rewrite the synthesis
-// code, those few names are provided here so the ported sources stay diffable
-// against upstream.
+// The SCSP, its DSP and the MB86233 TGP coprocessor are ported nearly verbatim
+// from MAME (via the sm2-emu reference), which was written against a handful of
+// helpers: a save-state Archive, a levelled log, fixed-width integer names,
+// sign extension and a couple of float<->bits reinterpretations. Rather than
+// rewrite the ported code, those few names are provided here so it stays
+// diffable against upstream.
 
 #include <bit>
 #include <cstddef>
@@ -106,6 +106,12 @@ void sound_log(const char* fmt, ...)
     } while (0)
 
 #define SM2_TRACE(...)                                                      \
+    do {                                                                    \
+        if (::sage::hw::detail::sound_log_enabled())                        \
+            ::sage::hw::sound_log(__VA_ARGS__);                             \
+    } while (0)
+
+#define SM2_DEBUG(...)                                                      \
     do {                                                                    \
         if (::sage::hw::detail::sound_log_enabled())                        \
             ::sage::hw::sound_log(__VA_ARGS__);                             \

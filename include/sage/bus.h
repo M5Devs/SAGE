@@ -10,6 +10,7 @@
 
 #include "sage/cpu/i960.h"
 #include "sage/cpu/sharc.h"
+#include "sage/cpu/tgp.h"
 #include "sage/eeprom.h"
 #include "sage/geometry.h"
 #include "sage/hw/i8251.h"
@@ -21,7 +22,17 @@
 
 namespace sage {
 
-// Sega Model 2B memory interconnect and peripheral set.
+// Which CPU-board coprocessor a set uses. Model 2B (Dead or Alive) pairs the
+// i960 with an ADSP-21062 "SHARC"; Model 2A (Virtua Fighter 2) replaces it with
+// the Fujitsu MB86234 "TGP". The choice changes which device receives the
+// coprocessor register writes, function ports and FIFOs, so it is fixed when the
+// set is attached.
+enum class Board {
+    Model2A,  // MB86234 TGP coprocessor
+    Model2B,  // ADSP-21062 SHARC coprocessor
+};
+
+// Sega Model 2 memory interconnect and peripheral set.
 //
 // Implements MAME's model2b_0229_mem() map for Dead or Alive: program ROM,
 // work RAM, the GEO/SHARC buffer RAM, the interrupt and timer controllers, the
@@ -71,7 +82,7 @@ public:
     std::uint32_t irq_request() const { return m_intreq; }
     std::uint32_t video_control() const { return m_videoctl; }
 
-    // ---- SHARC coprocessor ------------------------------------------------
+    // ---- SHARC coprocessor (Model 2B) -------------------------------------
     // The ADSP-21062 runs the motion/collision program the i960 uploads through
     // the coprocessor FIFOs. tick_copro() advances it in step with the i960.
     void tick_copro(int cycles);
@@ -81,6 +92,18 @@ public:
     const cpu::Sharc& sharc() const { return m_sharc; }
     cpu::Sharc& sharc_mutable() { return m_sharc; }
     const std::string& copro_fault() const { return m_copro_fault; }
+
+    // ---- TGP coprocessor (Model 2A) ---------------------------------------
+    // The MB86234 runs the geometry program the i960 uploads through the same
+    // host FIFOs. board() selects which of the two is live.
+    Board board() const { return m_board; }
+    bool is_model2a() const { return m_board == Board::Model2A; }
+    cpu::TgpCoprocessor& tgp() { return m_tgp; }
+    const cpu::TgpCoprocessor& tgp() const { return m_tgp; }
+    std::uint64_t tgp_instructions() const { return m_tgp.cpu().instructions(); }
+    std::uint32_t tgp_pc() const { return m_tgp.cpu().pc(); }
+    std::uint32_t tgp_uploaded_words() const { return m_tgp.uploaded_words(); }
+    bool tgp_halted() const { return m_tgp.cpu().halted(); }
 
     // ---- Sound ------------------------------------------------------------
     // The sound board is clocked from the host i960's cycles (25 MHz), which is
@@ -148,6 +171,14 @@ private:
     void eeprom_write(std::uint8_t data);
     void sound_ready_w();
     std::uint8_t in0_read() const;
+    // Polygon luma RAM decode. The aperture and packing differ between boards:
+    // Model 2B packs one byte per 16-bit half-word (umask16(0x00ff)) over a
+    // 0x10000-byte window; Model 2A packs one byte per 32-bit word
+    // (umask32(0x000000ff)) over 0x20000. Returns false when `addr` is outside
+    // the current board's aperture; otherwise `out` is the packed index and
+    // `entries` is how many consecutive entries a 32-bit access covers (2 for
+    // Model 2B, 1 for Model 2A).
+    bool luma_index(std::uint32_t addr, std::size_t& out, std::size_t& entries) const;
     void copro_fifo_w(std::uint32_t data);
     void copro_function_port_w(std::uint32_t offset, std::uint32_t data);
     std::uint32_t copro_fifo_r() const;
@@ -160,6 +191,24 @@ private:
     // input FIFO halts it until the SHARC drains. Without this the i960 races
     // arbitrarily far ahead and consumes uninitialised results.
     void copro_fifo_sync(bool need_out) const;
+
+    // ---- TGP host side (Model 2A) ----------------------------------------
+    // The same register windows drive the MB86234 instead of the SHARC. The
+    // TGP's own flow control halts the coprocessor; the host side here is what
+    // keeps the i960 from reading a result the coprocessor has not produced yet.
+    void tgp_ctl1_write(std::uint32_t value);
+    void tgp_fifo_w(std::uint32_t data);
+    std::uint32_t tgp_fifo_r() const;
+    void tgp_function_port_w(std::uint32_t byte_offset, std::uint32_t data);
+    // Run the TGP until a result appears (or it can make no further progress),
+    // borrowing the time from its future share so the i960 does not stall on
+    // every poll. The same role copro_fifo_sync() plays for the SHARC.
+    void tgp_sync() const;
+    // FIFO flow-control hooks (the host side of the handshake). The TGP is
+    // advanced every tick_copro(), so these only record intent.
+    void tgp_host_stall() const;
+    void tgp_host_halt() const;
+    void tgp_host_resume() const;
 
     // Board-side coprocessor FIFOs (MAME generic_fifo_u32_device).
     struct CoproFifo {
@@ -242,6 +291,23 @@ private:
     mutable std::uint64_t m_copro_phase = 0;
     mutable std::string m_copro_fault;
     mutable bool m_copro_in_sync = false;
+
+    // Board selection and the Model 2A TGP. Both coprocessors are always
+    // constructed; `m_board` decides which one the register windows drive.
+    Board m_board = Board::Model2B;
+    // Mutable because the register windows are read through const Bus accessors
+    // (read_register/read32), exactly like the SHARC members above.
+    mutable cpu::TgpCoprocessor m_tgp;
+    // Spans onto the TGP's table/data ROMs, which live in the loader's regions.
+    // Kept as byte spans so the lifetime is explicit; the word views handed to
+    // the coprocessor are built from them at attach time.
+    std::vector<std::uint32_t> m_tgp_tables_words;
+    std::vector<std::uint32_t> m_tgp_data_words;
+    std::vector<std::uint32_t> m_tgp_other_words;
+    // TGP time debt, in thirds of an i960 cycle times two, matching the ratio
+    // used for the SHARC (TGP 50 MHz vs i960 25 MHz, three clocks/instruction).
+    mutable std::uint32_t m_tgp_debt = 0;
+    mutable bool m_tgp_in_sync = false;
 
     InputState m_inputs;
     std::uint32_t m_framenum = 0;

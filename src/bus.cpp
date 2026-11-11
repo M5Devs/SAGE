@@ -10,7 +10,10 @@
 
 #include "sage/bus.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <span>
 #include <string_view>
 
 namespace sage {
@@ -27,6 +30,9 @@ constexpr std::uint32_t kCoproIopBase = 0x008c0000;
 constexpr std::uint32_t kBufferRamBase = 0x00900000;
 constexpr std::uint32_t kCoproCtlBase = 0x00980000;
 constexpr std::uint32_t kUartBase = 0x009c0000;
+// Model 2A moves the i8251 UART to 0x01c80000 and narrows it to umask16(0x00ff),
+// so the two registers are a half-word apart instead of a dword.
+constexpr std::uint32_t kUartBase2a = 0x01c80000;
 constexpr std::uint32_t kCpuCtlBase = 0x00e00000;
 constexpr std::uint32_t kIrqBase = 0x00e80000;
 constexpr std::uint32_t kTimersBase = 0x00f00000;
@@ -35,6 +41,15 @@ constexpr std::uint32_t kPolygonCountBase = 0x10400000;
 constexpr std::uint32_t kTexture0Base = 0x11000000;
 constexpr std::uint32_t kTexture1Base = 0x11200000;
 constexpr std::uint32_t kLumaBase = 0x11400000;
+// Model 2A moves the video apertures: texture RAM 0/1 sit at 0x12000000 and
+// 0x12400000 (each a 0x200000 region mirrored, so the window spans 0x400000) and
+// the polygon luma RAM at 0x12800000 (0x20000, umask32(0x000000ff): one byte per
+// 32-bit word, against the Model 2B's one byte per 16-bit half-word).
+constexpr std::uint32_t kTexture0Base2a = 0x12000000;
+constexpr std::uint32_t kTexture1Base2a = 0x12400000;
+constexpr std::uint32_t kLumaBase2a = 0x12800000;
+constexpr std::size_t kTexture2aSpan = 0x00400000;
+constexpr std::size_t kLumaSpan2a = 0x00020000;
 constexpr std::uint32_t kIoBase = 0x01c00000;
 constexpr std::uint32_t kBackupBase = 0x01d00000;
 constexpr std::uint32_t kProtBase = 0x01d80000;
@@ -93,6 +108,25 @@ std::span<const std::uint8_t> region_span(const RomLoader& roms, std::string_vie
     if (const Region* r = roms.region(name))
         return r->data;
     return {};
+}
+
+// A ROM region reinterpreted as 32-bit words. The TGP addresses its ROMs a word
+// at a time, and MAME's ROM_REGION32_LE already stores the region little-endian
+// with the ROM_LOAD32_WORD entries interleaved, so a straight reinterpretation
+// is the same view MAME's as_u32() takes.
+std::vector<std::uint32_t> region_words(const RomLoader& roms, std::string_view name) {
+    std::vector<std::uint32_t> words;
+    if (const Region* r = roms.region(name)) {
+        const std::size_t count = r->data.size() / 4;
+        words.resize(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            const std::size_t o = i * 4;
+            words[i] = std::uint32_t(r->data[o]) | (std::uint32_t(r->data[o + 1]) << 8) |
+                       (std::uint32_t(r->data[o + 2]) << 16) |
+                       (std::uint32_t(r->data[o + 3]) << 24);
+        }
+    }
+    return words;
 }
 
 }  // namespace
@@ -232,6 +266,40 @@ void Bus::attach(const RomLoader& roms, std::string_view game) {
     if (const Region* cd = roms.region("copro_data"))
         m_copro_data = cd->data;
 
+    // Board selection: the Model 2A sets carry a `copro_tgp_tables` region and
+    // use the MB86234 TGP; everything else uses the SHARC. Choosing from the
+    // loaded regions keeps the decision with the ROM set rather than the caller.
+    m_board = roms.region("copro_tgp_tables") != nullptr ? Board::Model2A : Board::Model2B;
+
+    if (m_board == Board::Model2A) {
+        // The coprocessor reads the CPU board's mathematical tables and the
+        // game's own data ROM, and writes its results into the display list
+        // buffer. The regions are byte-oriented; the TGP wants 32-bit words, so
+        // word views are materialised here and outlive the attach().
+        m_tgp_tables_words = region_words(roms, "copro_tgp_tables");
+        m_tgp_data_words   = region_words(roms, "copro_data");
+        m_tgp_other_words  = region_words(roms, "other_data");
+
+        auto* buffer_words = reinterpret_cast<std::uint32_t*>(m_bufferram.data());
+        const std::size_t buffer_count = m_bufferram.size() / 4;
+        m_tgp.attach(m_tgp_tables_words, m_tgp_data_words, m_tgp_other_words,
+                     std::span<std::uint32_t>(buffer_words, buffer_count));
+        m_tgp.reset();
+
+        // Host side of the FIFO flow control, the same handshake MAME wires for
+        // the SHARC: a read of an empty output FIFO stalls the i960 until the
+        // TGP produces a value; a write into a full input FIFO stalls it until
+        // the TGP drains one. Only the machine can stall the host CPU, which is
+        // why this is here and not inside the coprocessor.
+        m_tgp.fifo_out().set_on_empty_retry([this] { tgp_host_stall(); });
+        m_tgp.fifo_out().set_on_empty_halt([this] { tgp_host_halt(); });
+        m_tgp.fifo_out().set_on_unempty([this] { tgp_host_resume(); });
+        m_tgp.fifo_in().set_on_full([this] { tgp_host_halt(); });
+        m_tgp.fifo_in().set_on_unfull([this] { tgp_host_resume(); });
+        m_tgp_debt    = 0;
+        m_tgp_in_sync = false;
+    }
+
     // 3D geometry: share buffer RAM, the texture/polygon ROMs and the video RAM
     // the rasteriser reads (MAME wires these as device tags on the renderer).
     m_geometry.reset();
@@ -312,6 +380,28 @@ std::uint8_t* Bus::map(std::uint32_t addr, std::size_t len, bool& writable) cons
         return const_cast<std::uint8_t*>(m_textureram1.data()) +
                ((addr - kTexture1Base) % m_textureram1.size());
     }
+    // Model 2A texture RAM. MAME maps a 0x200000 region with `.mirror(0x200000)`,
+    // so tex0 repeats across 0x12000000-0x123fffff and tex1 across
+    // 0x12400000-0x127fffff, each window indexing the 0x100000 array modulo its
+    // size.
+    if (is_model2a()) {
+        auto tex = [&](std::uint32_t base, const std::vector<std::uint8_t>& ram) -> std::uint8_t* {
+            if (addr < base || addr - base >= kTexture2aSpan)
+                return nullptr;
+            const std::size_t off = (addr - base) % ram.size();
+            if (off + len > ram.size())
+                return nullptr;
+            return const_cast<std::uint8_t*>(ram.data()) + off;
+        };
+        if (std::uint8_t* p = tex(kTexture0Base2a, m_textureram0)) {
+            writable = true;
+            return p;
+        }
+        if (std::uint8_t* p = tex(kTexture1Base2a, m_textureram1)) {
+            writable = true;
+            return p;
+        }
+    }
 
     // Luma RAM is deliberately not mapped here: its 16-bit aperture packs one
     // byte per half-word (umask16(0x00ff)), so a plain byte window would put the
@@ -353,15 +443,26 @@ bool Bus::read_register(std::uint32_t addr, unsigned lane, std::uint8_t& out) co
         return true;
     }
 
-    // 0x00980000: SHARC coprocessor and GEO control/status.
+    // 0x00980000: coprocessor (SHARC or TGP) and GEO control/status.
     if (addr >= kCoproCtlBase && addr < kCoproCtlBase + 0x1000) {
         switch ((addr - kCoproCtlBase) >> 2) {
             case 0:  // copro control 1
-                out = byte_lane(m_coproctl, lane);
+                out = byte_lane(is_model2a() ? m_tgp.control_read() : m_coproctl, lane);
                 return true;
-            case 1:  // copro FIFO control: bit 0 set while the output FIFO is empty
-                out = byte_lane(m_fifo_out.empty() ? 1u : 0u, lane);
+            case 1: {  // copro FIFO control: bit 0 set while the output FIFO is empty
+                bool empty;
+                if (is_model2a()) {
+                    // A game polls this before reading a result, so give the TGP
+                    // a chance to produce one first.
+                    if (m_tgp.output_empty())
+                        tgp_sync();
+                    empty = m_tgp.output_empty();
+                } else {
+                    empty = m_fifo_out.empty();
+                }
+                out = byte_lane(empty ? 1u : 0u, lane);
                 return true;
+            }
             case 2:  // GEO control 1
                 out = byte_lane(m_geoctl, lane);
                 return true;
@@ -372,7 +473,10 @@ bool Bus::read_register(std::uint32_t addr, unsigned lane, std::uint8_t& out) co
                 return true;
             }
             case 5:  // copro status: 0xffffffff once a program has been uploaded
-                out = byte_lane(m_coprocnt == 0 ? 0xffffffffu : 0u, lane);
+                if (is_model2a())
+                    out = byte_lane(m_tgp.uploaded_words() == 0 ? 0xffffffffu : 0u, lane);
+                else
+                    out = byte_lane(m_coprocnt == 0 ? 0xffffffffu : 0u, lane);
                 return true;
             default:
                 out = 0xff;
@@ -380,14 +484,18 @@ bool Bus::read_register(std::uint32_t addr, unsigned lane, std::uint8_t& out) co
         }
     }
 
-    // 0x009c0000 i8251 UART. MAME maps this range umask32(0x000000ff), so the
-    // two registers sit one dword apart: data at 0x009c0000 and status at
-    // 0x009c0004. The value returned here is the low byte lane, which is what
-    // umask32 leaves visible.
-    if (addr >= kUartBase && addr < kUartBase + 8) {
-        // Only lane 0 is connected (umask32(0x000000ff)); the others read back 0.
-        out = (lane == 0) ? m_uart.read((addr - kUartBase) >> 2) : 0x00;
-        return true;
+    // 0x009c0000 i8251 UART (0x01c80000 on Model 2A). MAME maps this range
+    // umask32(0x000000ff) on Model 2B and umask16(0x00ff) on Model 2A, so the two
+    // registers sit one dword apart on 2B and one half-word apart on 2A. The value
+    // returned here is the low byte lane, which is what the mask leaves visible.
+    {
+        const std::uint32_t uart_base  = is_model2a() ? kUartBase2a : kUartBase;
+        const unsigned      uart_shift = is_model2a() ? 1u : 2u;
+        if (addr >= uart_base && addr < uart_base + 8) {
+            // Only lane 0 is connected; the others read back 0.
+            out = (lane == 0) ? m_uart.read((addr - uart_base) >> uart_shift) : 0x00;
+            return true;
+        }
     }
 
     // IRQ controller: request / enable.
@@ -422,10 +530,22 @@ bool Bus::write_register(std::uint32_t addr, unsigned lane, std::uint8_t data) {
         return true;
     }
 
+    // Model 2A maps 0x01c00040-0x01c00043 as a write-only nop (MAME:
+    // model2a_crx_mem's `.nopw()`), for every access width.
+    if (is_model2a() && addr >= 0x01c00040 && addr < 0x01c00044)
+        return true;
+
     if (addr >= kCoproCtlBase && addr < kCoproCtlBase + 0x1000) {
         const std::uint32_t mask = 0xffu << (lane * 8);
         switch ((addr - kCoproCtlBase) >> 2) {
             case 0: {  // copro control 1: high-bit edge halts / boots the copro
+                if (is_model2a()) {
+                    const std::uint32_t nv =
+                        (m_tgp.control_read() & ~mask) |
+                        (static_cast<std::uint32_t>(data) << (lane * 8));
+                    tgp_ctl1_write(nv);
+                    return true;
+                }
                 const std::uint32_t nv =
                     (m_coproctl & ~mask) | (static_cast<std::uint32_t>(data) << (lane * 8));
                 copro_ctl1_write(nv);
@@ -450,11 +570,15 @@ bool Bus::write_register(std::uint32_t addr, unsigned lane, std::uint8_t data) {
     if (addr >= kCoproIopBase && addr < kCoproIopBase + 0x1000)
         return true;  // SHARC IOP port is write-only
 
-    if (addr >= kUartBase && addr < kUartBase + 8) {
-        // Only lane 0 is connected (umask32(0x000000ff)).
-        if (lane == 0)
-            m_uart.write((addr - kUartBase) >> 2, data);
-        return true;
+    {
+        const std::uint32_t uart_base  = is_model2a() ? kUartBase2a : kUartBase;
+        const unsigned      uart_shift = is_model2a() ? 1u : 2u;
+        if (addr >= uart_base && addr < uart_base + 8) {
+            // Only lane 0 is connected.
+            if (lane == 0)
+                m_uart.write((addr - uart_base) >> uart_shift, data);
+            return true;
+        }
     }
 
     if (addr >= kIrqBase && addr < kIrqBase + 8) {
@@ -526,13 +650,27 @@ void Bus::watch_log(char op, std::uint32_t addr, std::uint32_t data) const {
     std::fprintf(stderr, "[watch] %c pc=%08X addr=%08X data=%08X\n", op, pc, addr, data);
 }
 
-std::uint8_t Bus::raw_read8(std::uint32_t addr) const {
-    // Luma RAM: umask16(0x00ff) over a 0x10000-byte aperture packs one byte per
-    // 16-bit half-word, so the array index is the byte offset >> 1.
-    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) {
-        const std::size_t idx = (addr - kLumaBase) >> 1;
-        return idx < m_luma.size() ? m_luma[idx] : 0;
+bool Bus::luma_index(std::uint32_t addr, std::size_t& out, std::size_t& entries) const {
+    if (is_model2a()) {
+        if (addr < kLumaBase2a || addr >= kLumaBase2a + kLumaSpan2a)
+            return false;
+        out     = (addr - kLumaBase2a) >> 2;  // one byte per 32-bit word
+        entries = 1;
+        return true;
     }
+    if (addr < kLumaBase || addr >= kLumaBase + kLumaSpan)
+        return false;
+    out     = (addr - kLumaBase) >> 1;  // one byte per 16-bit half-word
+    entries = 2;
+    return true;
+}
+
+std::uint8_t Bus::raw_read8(std::uint32_t addr) const {
+    // Luma RAM: the packed index is one byte per address step (a half-word on
+    // Model 2B, a word on Model 2A).
+    std::size_t luma_idx = 0, luma_entries = 0;
+    if (luma_index(addr, luma_idx, luma_entries))
+        return luma_idx < m_luma.size() ? m_luma[luma_idx] : 0;
 
     bool w = false;
     if (const std::uint8_t* p = map(addr, 1, w))
@@ -559,11 +697,10 @@ std::uint8_t Bus::read8(std::uint32_t addr) const {
 std::uint16_t Bus::read16(std::uint32_t addr) const {
     watch_log('R', addr, 0);
 
-    // Luma RAM: one byte per 16-bit half-word, returned in the low lane.
-    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) {
-        const std::size_t idx = (addr - kLumaBase) >> 1;
-        return idx < m_luma.size() ? m_luma[idx] : 0;
-    }
+    // Luma RAM: one byte per address step, returned in the low lane.
+    std::size_t luma_idx = 0, luma_entries = 0;
+    if (luma_index(addr, luma_idx, luma_entries))
+        return luma_idx < m_luma.size() ? m_luma[luma_idx] : 0;
 
     // 317-0229 registers overlay the tail of the protection source RAM window,
     // so they must be decoded before the RAM fallback (matches MAME's
@@ -594,17 +731,20 @@ std::uint32_t Bus::read32(std::uint32_t addr) const {
     watch_log('R', addr, 0);
     if (m_trace) ++m_read_hist[addr & 0xfffc0000];
 
-    // Luma RAM: umask16(0x00ff) means a 32-bit access gathers two 16-bit
-    // half-word reads, each one byte in its low lane.
-    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) {
-        const std::size_t idx = (addr - kLumaBase) >> 1;
-        const std::uint32_t lo = idx < m_luma.size() ? m_luma[idx] : 0;
-        const std::uint32_t hi = idx + 1 < m_luma.size() ? m_luma[idx + 1] : 0;
-        return lo | (hi << 16);
+    // Luma RAM: a 32-bit access covers `entries` packed bytes, one per 16-bit
+    // half-word on Model 2B or one per 32-bit word on Model 2A.
+    {
+        std::size_t luma_idx = 0, luma_entries = 0;
+        if (luma_index(addr, luma_idx, luma_entries)) {
+            std::uint32_t v = luma_idx < m_luma.size() ? m_luma[luma_idx] : 0;
+            if (luma_entries >= 2)
+                v |= std::uint32_t(luma_idx + 1 < m_luma.size() ? m_luma[luma_idx + 1] : 0) << 16;
+            return v;
+        }
     }
 
     if (addr >= kCoproFifoBase && addr < kCoproFifoBase + 0x4000)
-        return copro_fifo_r();
+        return is_model2a() ? tgp_fifo_r() : copro_fifo_r();
 
     if (addr >= kProtBase + 0x7ff8 && addr < kProtBase + 0x7ffc) {
         const std::uint32_t lo = read16(addr);
@@ -630,10 +770,10 @@ std::uint32_t Bus::read32(std::uint32_t addr) const {
 void Bus::write8(std::uint32_t addr, std::uint8_t val) {
     if (m_trace) ++m_write_hist[addr & 0xfffc0000];
     watch_log('W', addr, val);
-    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) {
-        const std::size_t idx = (addr - kLumaBase) >> 1;
-        if (idx < m_luma.size())
-            m_luma[idx] = val;
+    std::size_t luma_idx = 0, luma_entries = 0;
+    if (luma_index(addr, luma_idx, luma_entries)) {
+        if (luma_idx < m_luma.size())
+            m_luma[luma_idx] = val;
         return;
     }
     bool w = false;
@@ -673,11 +813,11 @@ void Bus::write8(std::uint32_t addr, std::uint8_t val) {
 void Bus::write16(std::uint32_t addr, std::uint16_t val) {
     watch_log('W', addr, val);
 
-    // Luma RAM: one byte per 16-bit half-word (umask16(0x00ff)).
-    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) {
-        const std::size_t idx = (addr - kLumaBase) >> 1;
-        if (idx < m_luma.size())
-            m_luma[idx] = static_cast<std::uint8_t>(val);
+    // Luma RAM: one byte per address step.
+    std::size_t luma_idx = 0, luma_entries = 0;
+    if (luma_index(addr, luma_idx, luma_entries)) {
+        if (luma_idx < m_luma.size())
+            m_luma[luma_idx] = static_cast<std::uint8_t>(val);
         return;
     }
 
@@ -707,15 +847,17 @@ void Bus::write16(std::uint32_t addr, std::uint16_t val) {
 void Bus::write32(std::uint32_t addr, std::uint32_t val) {
     watch_log('W', addr, val);
 
-    // Luma RAM: one byte per 16-bit half-word (umask16(0x00ff)). A 32-bit store
-    // covers two half-words, so it writes two consecutive entries.
-    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) {
-        const std::size_t idx = (addr - kLumaBase) >> 1;
-        if (idx < m_luma.size())
-            m_luma[idx] = static_cast<std::uint8_t>(val);
-        if (idx + 1 < m_luma.size())
-            m_luma[idx + 1] = static_cast<std::uint8_t>(val >> 16);
-        return;
+    // Luma RAM: a 32-bit store covers `entries` packed bytes, one per 16-bit
+    // half-word on Model 2B or one per 32-bit word on Model 2A.
+    {
+        std::size_t luma_idx = 0, luma_entries = 0;
+        if (luma_index(addr, luma_idx, luma_entries)) {
+            if (luma_idx < m_luma.size())
+                m_luma[luma_idx] = static_cast<std::uint8_t>(val);
+            if (luma_entries >= 2 && luma_idx + 1 < m_luma.size())
+                m_luma[luma_idx + 1] = static_cast<std::uint8_t>(val >> 16);
+            return;
+        }
     }
 
     // Protection registers overlay the source RAM window; decode them first.
@@ -770,14 +912,24 @@ void Bus::write32(std::uint32_t addr, std::uint32_t val) {
         return;
 
     if (addr >= kCoproFunctionBase && addr < kCoproFunctionBase + 0x4000) {
-        copro_function_port_w(addr - kCoproFunctionBase, val);
+        if (is_model2a())
+            tgp_function_port_w(addr - kCoproFunctionBase, val);
+        else
+            copro_function_port_w(addr - kCoproFunctionBase, val);
         return;
     }
     if (addr >= kCoproFifoBase && addr < kCoproFifoBase + 0x4000) {
-        copro_fifo_w(val);
+        if (is_model2a())
+            tgp_fifo_w(val);
+        else
+            copro_fifo_w(val);
         return;
     }
     if (addr >= kCoproIopBase && addr < kCoproIopBase + 0x1000) {
+        // The SHARC's IOP port. The TGP has no equivalent window; MAME leaves it
+        // unmapped on the Model 2A map, so a write is ignored.
+        if (is_model2a())
+            return;
         try {
             // MAME registers this window on the i960's 32-bit space, so the
             // device handler receives a word index (byte address >> 2).
@@ -815,8 +967,11 @@ bool Bus::burst(std::uint32_t addr) const {
     if (addr >= kGeoPrgBase && addr < kGeoPrgBase + 0x4000) return true;
     if (addr >= kCoproFunctionBase && addr < kCoproFunctionBase + 0x4000) return true;
     // Luma RAM is flagged BURST in MAME; it is decoded outside map(), so it must
-    // be listed here explicitly.
-    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) return true;
+    // be listed here explicitly (both boards' apertures).
+    {
+        std::size_t luma_idx = 0, luma_entries = 0;
+        if (luma_index(addr, luma_idx, luma_entries)) return true;
+    }
     // The CPU wait-state block is the one plain-RAM aperture MAME leaves non-BURST.
     if (addr >= kCpuCtlBase && addr < kCpuCtlBase + kCpuCtlSize) return false;
     bool w = false;
@@ -1045,6 +1200,18 @@ void Bus::copro_function_port_w(std::uint32_t byte_offset, std::uint32_t data) {
 }
 
 void Bus::tick_copro(int cycles) {
+    if (is_model2a()) {
+        // TGP 50 MHz at three clocks per instruction vs i960 25 MHz: two TGP
+        // instructions per three host cycles. The remainder is kept so the ratio
+        // is exact across slices.
+        m_tgp_debt += static_cast<std::uint32_t>(cycles) * 2;
+        const std::int32_t tgp_cycles = static_cast<std::int32_t>(m_tgp_debt / 3);
+        m_tgp_debt %= 3;
+        if (tgp_cycles > 0)
+            static_cast<void>(m_tgp.run(tgp_cycles));
+        return;
+    }
+
     if (m_copro_halted || !m_copro_fault.empty()) return;
     // SHARC 32 MHz vs i960 25 MHz: accumulate the fractional remainder so the
     // two stay in step over long runs.
@@ -1061,6 +1228,79 @@ void Bus::tick_copro(int cycles) {
             m_copro_halted = true;
         }
     }
+}
+
+// ---- TGP coprocessor (Model 2A) --------------------------------------------
+
+void Bus::tgp_host_stall() const {
+    // The TGP read an empty output FIFO. MAME stalls the i960 so it re-executes
+    // the load; SAGE's i960 has no cheap re-execute for a plain load, so the
+    // sync path below already ran the TGP forward before the read. Nothing more
+    // is needed here beyond keeping the hook (the halt variant is the hard stop).
+}
+
+void Bus::tgp_host_halt() const {
+    // A full input FIFO (or an empty output one) stops the host until the TGP
+    // makes progress. SAGE advances the TGP every tick_copro(), so the halt is
+    // recorded for diagnostics only; halting the i960 outright would deadlock
+    // the single-threaded loop, which is why the SHARC path uses a bounded sync
+    // instead. Kept as a no-op so the wiring matches MAME's.
+}
+
+void Bus::tgp_host_resume() const {}
+
+void Bus::tgp_sync() const {
+    if (m_tgp_in_sync)
+        return;
+    m_tgp_in_sync = true;
+
+    // Run in small steps and stop as soon as a result appears, so a program that
+    // polls for one value does not let the coprocessor race ahead of the host.
+    std::int32_t remaining = 4096;
+    while (remaining > 0 && m_tgp.output_empty() && !m_tgp.cpu().halted()) {
+        const std::int32_t slice = std::min<std::int32_t>(remaining, 32);
+        const std::int32_t used  = m_tgp.run(slice);
+        if (used <= 0)
+            break;
+        remaining -= used;
+        // Borrow from the coprocessor's future share so this time is not spent
+        // twice. The debt is in thirds of a host cycle, times two.
+        const std::uint32_t owed = static_cast<std::uint32_t>(used) * 3;
+        m_tgp_debt = m_tgp_debt > owed ? m_tgp_debt - owed : 0;
+    }
+
+    m_tgp_in_sync = false;
+}
+
+void Bus::tgp_ctl1_write(std::uint32_t value) {
+    if (std::getenv("SAGE_TGP_TRACE"))
+        std::fprintf(stderr, "[tgp] ctl1 write %08X pc=%08X\n", value,
+                     m_cpu ? m_cpu->get_ip() : 0);
+    m_tgp.control_write(value);
+}
+
+void Bus::tgp_fifo_w(std::uint32_t data) {
+    if (std::getenv("SAGE_TGP_TRACE"))
+        std::fprintf(stderr, "[tgp] fifo_w %08X (ctl=%08X cnt=%u) pc=%08X\n", data,
+                     m_tgp.control_read(), m_tgp.uploaded_words(),
+                     m_cpu ? m_cpu->get_ip() : 0);
+    m_tgp.host_fifo_write(data);
+}
+
+std::uint32_t Bus::tgp_fifo_r() const {
+    if (m_tgp.output_empty())
+        tgp_sync();
+    const std::uint32_t v = m_tgp.host_fifo_read();
+    if (std::getenv("SAGE_TGP_TRACE"))
+        std::fprintf(stderr, "[tgp] fifo_r %08X pc=%08X\n", v, m_cpu ? m_cpu->get_ip() : 0);
+    return v;
+}
+
+void Bus::tgp_function_port_w(std::uint32_t byte_offset, std::uint32_t data) {
+    if (std::getenv("SAGE_TGP_TRACE"))
+        std::fprintf(stderr, "[tgp] func port %04X <- %08X pc=%08X\n", byte_offset, data,
+                     m_cpu ? m_cpu->get_ip() : 0);
+    m_tgp.function_port_write(byte_offset, data);
 }
 
 }  // namespace sage

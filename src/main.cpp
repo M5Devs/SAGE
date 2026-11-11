@@ -592,11 +592,23 @@ int main(int argc, char** argv) {
     std::printf("  Unmapped reads  : %" PRIu64 "\n", bus.unmapped_reads);
     std::printf("  Unmapped writes : %" PRIu64 "\n", bus.unmapped_writes);
     std::printf("  ROM writes      : %" PRIu64 "\n", bus.rom_writes);
-    std::printf("  Copro (SHARC)   : %" PRIu64 " insns, PC=0x%06X%s\n",
-                bus.copro_instructions(), bus.copro_pc(),
-                bus.copro_fault().empty() ? "" : " [FAULT]");
-    if (!bus.copro_fault().empty())
-        std::printf("  Copro fault     : %s\n", bus.copro_fault().c_str());
+    if (bus.is_model2a()) {
+        const auto& act = bus.tgp().activity();
+        std::printf("  Copro (TGP)     : %" PRIu64 " insns, PC=0x%04X, %u word(s) uploaded%s\n",
+                    bus.tgp_instructions(), bus.tgp_pc(), bus.tgp_uploaded_words(),
+                    bus.tgp_halted() ? " [halted]" : "");
+        std::printf("  TGP activity    : %" PRIu64 " cmds in, %" PRIu64 " results out, "
+                    "%" PRIu64 " table reads, %" PRIu64 " data ROM reads, "
+                    "%" PRIu64 " buffer writes\n",
+                    act.commands_received, act.results_sent, act.table_reads,
+                    act.data_rom_reads, act.buffer_writes);
+    } else {
+        std::printf("  Copro (SHARC)   : %" PRIu64 " insns, PC=0x%06X%s\n",
+                    bus.copro_instructions(), bus.copro_pc(),
+                    bus.copro_fault().empty() ? "" : " [FAULT]");
+        if (!bus.copro_fault().empty())
+            std::printf("  Copro fault     : %s\n", bus.copro_fault().c_str());
+    }
 
     // Sound board: the 68EC000 and the SCSP. The counters show whether the
     // sound program is running and the host has handed it any commands.
