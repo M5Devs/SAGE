@@ -40,7 +40,13 @@ std::uint32_t crc32(const std::uint8_t* data, std::size_t len) {
 std::uint32_t crc32(const std::vector<std::uint8_t>& v) { return crc32(v.data(), v.size()); }
 
 // ---------------------------------------------------------------------------
-// ROM definition tables, transcribed from MAME's ROM_START( doa ) / doab.
+// ROM definition tables, transcribed from MAME's model2.cpp ROM_START blocks:
+//
+//   doa / doab  Sega Model 2B, Dead or Alive (Rev C / Rev B)
+//   vf2         Sega Model 2A, Virtua Fighter 2 (Version 2.1)
+//
+// Each entry mirrors one ROM_LOAD macro; a game selects one region table and
+// two entry lists (the program ROMs plus everything shared).
 // ---------------------------------------------------------------------------
 
 struct RegionDef {
@@ -67,10 +73,25 @@ struct Entry {
     std::uint32_t copy_dst; // destination offset for Copy entries
 };
 
-// Region indices
-enum : std::uint32_t { R_MAINCPU, R_MAIN_DATA, R_POLYGONS, R_TEXTURES, R_COPRO_DATA, R_AUDIOCPU, R_SAMPLES };
+// Region indices. Both games order their region table the same way so a single
+// set of constants addresses either one; the Model 2A-only regions sit at the
+// end.
+enum : std::uint32_t {
+    R_MAINCPU,
+    R_MAIN_DATA,
+    R_POLYGONS,
+    R_TEXTURES,
+    R_COPRO_DATA,
+    R_AUDIOCPU,
+    R_SAMPLES,
+    R_COPRO_TGP_TABLES,
+    R_OTHER_DATA,
+    R_VIDEO_UNK,
+};
 
-constexpr RegionDef kRegions[] = {
+// --- Dead or Alive (Model 2B) ---------------------------------------------
+
+constexpr RegionDef kDoaRegions[] = {
     {"maincpu", 0x00200000, 8, false, 0x00},
     {"main_data", 0x02000000, 32, false, 0x00},
     {"polygons", 0x02000000, 32, false, 0xFF},
@@ -84,7 +105,7 @@ constexpr RegionDef kRegions[] = {
 // differ between the doa and doab revisions). The alt_crc field records a
 // known-good alternate dump (0 = none); mpr-19324.19 exists in the wild as
 // 0xD972201F (documented in the m2emu 1.1a DAT) as well as MAME's 0x0D6BF454.
-constexpr Entry kSharedEntries[] = {
+constexpr Entry kDoaSharedEntries[] = {
     {R_MAIN_DATA, EntryKind::Load, "mpr-19318.11", 0x00000000, 0x00400000, 0xAB431BFE, 0x00000000, 2, 2, false, 0},
     {R_MAIN_DATA, EntryKind::Load, "mpr-19319.12", 0x00000002, 0x00400000, 0xC5CB694D, 0x00000000, 2, 2, false, 0},
     {R_MAIN_DATA, EntryKind::Load, "mpr-19316.9", 0x00800000, 0x00400000, 0x2D2D1B1A, 0x00000000, 2, 2, false, 0},
@@ -111,14 +132,87 @@ constexpr Entry kSharedEntries[] = {
 
 // The two program ROMs are the only difference between the doa (Rev C) and
 // doab (Rev B) sets.
-constexpr Entry kProgramDoa[] = {
+constexpr Entry kDoaProgramDoa[] = {
     {R_MAINCPU, EntryKind::Load, "epr-19379c.15", 0x00000000, 0x00080000, 0x5CC62FBE, 0x00000000, 2, 2, false, 0},
     {R_MAINCPU, EntryKind::Load, "epr-19380c.16", 0x00000002, 0x00080000, 0x58CFEAA9, 0x00000000, 2, 2, false, 0},
 };
 
-constexpr Entry kProgramDoab[] = {
+constexpr Entry kDoaProgramDoab[] = {
     {R_MAINCPU, EntryKind::Load, "epr-19379b.15", 0x00000000, 0x00080000, 0x8A10A944, 0x00000000, 2, 2, false, 0},
     {R_MAINCPU, EntryKind::Load, "epr-19380b.16", 0x00000002, 0x00080000, 0x766C1EC8, 0x00000000, 2, 2, false, 0},
+};
+
+// --- Virtua Fighter 2 (Model 2A) ------------------------------------------
+
+constexpr RegionDef kVf2Regions[] = {
+    {"maincpu", 0x00200000, 8, false, 0x00},
+    {"main_data", 0x02400000, 32, false, 0x00},
+    {"polygons", 0x02000000, 32, false, 0x00},
+    {"textures", 0x01000000, 16, false, 0xFF},
+    {"copro_data", 0x00800000, 32, false, 0x00},
+    {"audiocpu", 0x00080000, 8, false, 0x00},
+    {"samples", 0x00800000, 16, true, 0x00},
+    {"copro_tgp_tables", 0x00040000, 32, false, 0x00},
+    {"other_data", 0x00080000, 32, false, 0x00},
+    {"video_unk", 0x00200000, 32, false, 0x00},
+};
+
+constexpr Entry kVf2Program[] = {
+    {R_MAINCPU, EntryKind::Load, "epr-18385.12", 0x000000, 0x020000, 0x78ED2D41, 0x00000000, 2, 2, false, 0},
+    {R_MAINCPU, EntryKind::Load, "epr-18386.13", 0x000002, 0x020000, 0x3418F428, 0x00000000, 2, 2, false, 0},
+    {R_MAINCPU, EntryKind::Load, "epr-18387.14", 0x040000, 0x020000, 0x124A8453, 0x00000000, 2, 2, false, 0},
+    {R_MAINCPU, EntryKind::Load, "epr-18388.15", 0x040002, 0x020000, 0x8D347980, 0x00000000, 2, 2, false, 0},
+};
+
+constexpr Entry kVf2SharedEntries[] = {
+    // main_data: the i960 sees this at 0x02000000.
+    {R_MAIN_DATA, EntryKind::Load, "mpr-17560.10", 0x000000, 0x200000, 0xD1389864, 0x00000000, 2, 2, false, 0},
+    {R_MAIN_DATA, EntryKind::Load, "mpr-17561.11", 0x000002, 0x200000, 0xB98D0101, 0x00000000, 2, 2, false, 0},
+    {R_MAIN_DATA, EntryKind::Load, "mpr-17558.8", 0x400000, 0x200000, 0x4B15F5A6, 0x00000000, 2, 2, false, 0},
+    {R_MAIN_DATA, EntryKind::Load, "mpr-17559.9", 0x400002, 0x200000, 0xD3264DE6, 0x00000000, 2, 2, false, 0},
+    {R_MAIN_DATA, EntryKind::Load, "mpr-17566.6", 0x800000, 0x200000, 0xFB41EF98, 0x00000000, 2, 2, false, 0},
+    {R_MAIN_DATA, EntryKind::Load, "mpr-17567.7", 0x800002, 0x200000, 0xC3396922, 0x00000000, 2, 2, false, 0},
+    {R_MAIN_DATA, EntryKind::Load, "mpr-17564.4", 0xC00000, 0x200000, 0xD8062489, 0x00000000, 2, 2, false, 0},
+    {R_MAIN_DATA, EntryKind::Load, "mpr-17565.5", 0xC00002, 0x200000, 0x0517C6E9, 0x00000000, 2, 2, false, 0},
+
+    // Model geometry, read by the geometry engine.
+    {R_POLYGONS, EntryKind::Load, "mpr-17554.16", 0x000000, 0x200000, 0x27896D82, 0x00000000, 2, 2, false, 0},
+    {R_POLYGONS, EntryKind::Load, "mpr-17548.20", 0x000002, 0x200000, 0xC95FACC2, 0x00000000, 2, 2, false, 0},
+    {R_POLYGONS, EntryKind::Load, "mpr-17555.17", 0x400000, 0x200000, 0x4DF2810B, 0x00000000, 2, 2, false, 0},
+    {R_POLYGONS, EntryKind::Load, "mpr-17549.21", 0x400002, 0x200000, 0xE0BCE0E6, 0x00000000, 2, 2, false, 0},
+    {R_POLYGONS, EntryKind::Load, "mpr-17556.18", 0x800000, 0x200000, 0x41A47616, 0x00000000, 2, 2, false, 0},
+    {R_POLYGONS, EntryKind::Load, "mpr-17550.22", 0x800002, 0x200000, 0xC36FF3F5, 0x00000000, 2, 2, false, 0},
+
+    // Texture headers / UV lists (ROMREGION_ERASEFF fills gaps with 0xFF).
+    {R_TEXTURES, EntryKind::Load, "mpr-17553.25", 0x000000, 0x200000, 0x5DA1C5D3, 0x00000000, 2, 2, false, 0},
+    {R_TEXTURES, EntryKind::Load, "mpr-17552.24", 0x000002, 0x200000, 0xE91E7427, 0x00000000, 2, 2, false, 0},
+    {R_TEXTURES, EntryKind::Load, "mpr-17547.27", 0x800000, 0x200000, 0xBE940431, 0x00000000, 2, 2, false, 0},
+    {R_TEXTURES, EntryKind::Load, "mpr-17546.26", 0x800002, 0x200000, 0x042A194B, 0x00000000, 2, 2, false, 0},
+
+    // 68000 sound program (big-endian, hence the byte swap).
+    {R_AUDIOCPU, EntryKind::Load, "epr-17574.30", 0x000000, 0x080000, 0x4D4C3A55, 0x00000000, 2, 0, true, 0},
+
+    // SCSP PCM samples.
+    {R_SAMPLES, EntryKind::Load, "mpr-17573.31", 0x000000, 0x200000, 0xE43557FE, 0x00000000, 2, 0, true, 0},
+    {R_SAMPLES, EntryKind::Load, "mpr-17572.32", 0x200000, 0x200000, 0x4FEBECC8, 0x00000000, 2, 0, true, 0},
+    {R_SAMPLES, EntryKind::Load, "mpr-17571.36", 0x400000, 0x200000, 0x51CAA584, 0x00000000, 2, 0, true, 0},
+    {R_SAMPLES, EntryKind::Load, "mpr-17570.37", 0x600000, 0x200000, 0xBCCD324B, 0x00000000, 2, 0, true, 0},
+
+    // CPU board maths tables (TGP sin/cos + arctangent).
+    {R_COPRO_TGP_TABLES, EntryKind::Load, "opr-14742a.45", 0x000000, 0x020000, 0x90C6B117, 0x00000000, 2, 2, false, 0},
+    {R_COPRO_TGP_TABLES, EntryKind::Load, "opr-14743a.46", 0x000002, 0x020000, 0xAE7F446B, 0x00000000, 2, 2, false, 0},
+
+    // Reciprocal and inverse-square-root tables (CPU board).
+    {R_OTHER_DATA, EntryKind::Load, "opr-14744.58", 0x000000, 0x020000, 0x730EA9E0, 0x00000000, 2, 2, false, 0},
+    {R_OTHER_DATA, EntryKind::Load, "opr-14745.59", 0x000002, 0x020000, 0x4C934D96, 0x00000000, 2, 2, false, 0},
+    {R_OTHER_DATA, EntryKind::Load, "opr-14746.62", 0x040000, 0x020000, 0x2A266CBD, 0x00000000, 2, 2, false, 0},
+    {R_OTHER_DATA, EntryKind::Load, "opr-14747.63", 0x040002, 0x020000, 0xA4AD5E19, 0x00000000, 2, 2, false, 0},
+
+    // 2A video-board SMT ROMs attached to the 315-5645 (ROM_LOAD32_BYTE: one
+    // byte per 32-bit word, stride 4).
+    {R_VIDEO_UNK, EntryKind::Load, "mpr-16310.15", 0x000000, 0x080000, 0xC078A780, 0x00000000, 1, 3, false, 0},
+    {R_VIDEO_UNK, EntryKind::Load, "mpr-16311.16", 0x000001, 0x080000, 0x452A492B, 0x00000000, 1, 3, false, 0},
+    {R_VIDEO_UNK, EntryKind::Load, "mpr-16312.14", 0x000002, 0x080000, 0xA25FEF5B, 0x00000000, 1, 3, false, 0},
 };
 
 struct ZipEntry {
@@ -213,27 +307,42 @@ bool RomLoader::load(std::string_view zip_path, std::string_view game) {
         by_name.emplace(e.name, i);
     }
 
-    // Pick the program ROM pair. The default "doa" auto-detects the revision
-    // present in the archive (the two sets differ only in these two ROMs).
+    // Select the region table, the shared ROM list and the program ROMs for the
+    // requested game. "doa" auto-detects the revision present in the archive
+    // (the two sets differ only in the two program ROMs).
+    std::span<const RegionDef> region_defs;
+    std::span<const Entry> shared_entries;
     std::span<const Entry> program;
-    if (game == "doab") {
-        program = kProgramDoab;
+    if (game == "vf2") {
+        region_defs = kVf2Regions;
+        shared_entries = kVf2SharedEntries;
+        program = kVf2Program;
+        report_.game = "Virtua Fighter 2";
+        report_.hardware = "Sega Model 2A (i960 + TGP + 315-5645 + SCSP)";
+        report_.revision = "Version 2.1";
+    } else if (game == "doab") {
+        region_defs = kDoaRegions;
+        shared_entries = kDoaSharedEntries;
+        program = kDoaProgramDoab;
+        report_.game = "Dead or Alive";
+        report_.hardware = "Sega Model 2B (i960 + 315-5881 + SCSP)";
+        report_.revision = "Revision B (Dec 6 1996)";
     } else if (game == "doa") {
-        const bool have_revc = by_crc.count(kProgramDoa[0].crc) || by_name.count(kProgramDoa[0].name);
-        program = have_revc ? std::span<const Entry>(kProgramDoa) : std::span<const Entry>(kProgramDoab);
+        region_defs = kDoaRegions;
+        shared_entries = kDoaSharedEntries;
+        const bool have_revc = by_crc.count(kDoaProgramDoa[0].crc) || by_name.count(kDoaProgramDoa[0].name);
+        program = have_revc ? std::span<const Entry>(kDoaProgramDoa) : std::span<const Entry>(kDoaProgramDoab);
+        report_.game = "Dead or Alive";
+        report_.hardware = "Sega Model 2B (i960 + 315-5881 + SCSP)";
+        report_.revision = have_revc ? "Revision C (Jan 10 1997)" : "Revision B (Dec 6 1996)";
     } else {
-        report_.error = "unknown game '" + std::string(game) + "' (expected 'doa' or 'doab')";
+        report_.error = "unknown game '" + std::string(game) + "' (expected 'doa', 'doab' or 'vf2')";
         return false;
     }
 
-    const bool rev_b = (program.data() == kProgramDoab);
-    report_.game = "Dead or Alive";
-    report_.hardware = "Sega Model 2B (i960 + 315-5881 + SCSP)";
-    report_.revision = rev_b ? "Revision B (Dec 6 1996)" : "Revision C (Jan 10 1997)";
-
     // Build empty regions (MAME ROM_REGION + ROMREGION_ERASE fill value).
-    regions_.reserve(std::size(kRegions));
-    for (const RegionDef& rd : kRegions) {
+    regions_.reserve(region_defs.size());
+    for (const RegionDef& rd : region_defs) {
         Region r;
         r.name = rd.tag;
         r.bus_width = rd.bus_width;
@@ -257,8 +366,8 @@ bool RomLoader::load(std::string_view zip_path, std::string_view game) {
         }
 
         // Resolve the file inside the archive: MAME matches by CRC first and
-        // only then by name (the archive's sound ROM is stored under a label
-        // that differs from MAME's, so CRC matching is what makes it work).
+        // only then by name (some archives store ROMs under labels that differ
+        // from MAME's, so CRC matching is what makes it work).
         std::optional<std::size_t> idx;
         if (auto it = by_crc.find(e.crc); it != by_crc.end())
             idx = it->second;
@@ -299,7 +408,7 @@ bool RomLoader::load(std::string_view zip_path, std::string_view game) {
     for (const Entry& e : program)
         if (!apply(e))
             return false;
-    for (const Entry& e : kSharedEntries)
+    for (const Entry& e : shared_entries)
         if (!apply(e))
             return false;
 

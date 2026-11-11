@@ -28,10 +28,10 @@ constexpr const char* kBanner =
 constexpr std::uint32_t kCpuClock = 25'000'000;
 constexpr int kFrameRate = 60;
 
-void print_banner() {
+void print_banner(const std::string& target) {
     std::printf("%s", kBanner);
     std::printf(" SAGE - Sega Arcade Golden-era Emulator\n");
-    std::printf(" Target: Dead or Alive - Sega Model 2B\n");
+    std::printf(" Target: %s\n", target.c_str());
     std::printf("============================================================\n\n");
 }
 
@@ -187,10 +187,12 @@ void patch_wav_sizes(std::FILE* f, std::uint64_t data_bytes) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    print_banner();
-
     const std::string zip_path = (argc > 1) ? argv[1] : "roms/doa.zip";
     const std::string game = (argc > 2) ? argv[2] : "doa";
+    const std::string target = (game == "vf2") ? "Virtua Fighter 2 - Sega Model 2A"
+                                               : "Dead or Alive - Sega Model 2B";
+    print_banner(target);
+
     const long frames = (argc > 3) ? std::atol(argv[3]) : 0;
     const long trace_instructions = std::getenv("SAGE_TRACE") ? 100'000 : 0;
 
@@ -318,7 +320,7 @@ int main(int argc, char** argv) {
     sage::Display display;
     const bool want_window = std::getenv("SAGE_HEADLESS") == nullptr;
     if (frames > 0 && want_window) {
-        if (display.open("SAGE - Dead or Alive (Sega Model 2B)", sage::Video::kWidth,
+        if (display.open(("SAGE - " + target).c_str(), sage::Video::kWidth,
                          sage::Video::kHeight))
             std::printf("SDL window opened (%dx%d). ESC or close to quit.\n\n",
                         sage::Video::kWidth, sage::Video::kHeight);
@@ -623,9 +625,10 @@ int main(int argc, char** argv) {
     }
     std::printf("------------------------------------------------------------\n");
     if (faulted)
-        std::printf("  doa.zip mapped and executed; CPU halted on an unimplemented opcode:\n    %s\n",
-                    fault_msg.c_str());
+        std::printf("  %s mapped and executed; CPU halted on an unimplemented opcode:\n    %s\n",
+                    zip_path.c_str(), fault_msg.c_str());
     else
-        std::printf("  doa.zip mapped into simulated address space.\n  Ready for CPU execution.\n");
+        std::printf("  %s mapped into simulated address space.\n  Ready for CPU execution.\n",
+                    zip_path.c_str());
     return faulted ? 2 : 0;
 }
