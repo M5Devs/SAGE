@@ -443,6 +443,16 @@ bool Bus::read_register(std::uint32_t addr, unsigned lane, std::uint8_t& out) co
         return true;
     }
 
+    // GEO function ports (0x00800000-0x00803fff, MAME geo_r/geo_w). Only the two
+    // address registers read back: 0x2008 is the write pointer and 0x3008 the
+    // read pointer. The i960 polls the write pointer to see how far the TGP has
+    // filled the display list, so this has to be wired for the geometry to
+    // advance. The byte lanes are little-endian, as the i960 sees them.
+    if (addr >= kGeoBase && addr < kGeoBase + 0x4000) {
+        out = byte_lane(m_geometry.geo_read(addr - kGeoBase), lane);
+        return true;
+    }
+
     // 0x00980000: coprocessor (SHARC or TGP) and GEO control/status.
     if (addr >= kCoproCtlBase && addr < kCoproCtlBase + 0x1000) {
         switch ((addr - kCoproCtlBase) >> 2) {
@@ -697,6 +707,12 @@ std::uint8_t Bus::read8(std::uint32_t addr) const {
 std::uint16_t Bus::read16(std::uint32_t addr) const {
     watch_log('R', addr, 0);
 
+    // GEO function ports (MAME geo_r): the two address registers read back at
+    // their dword offsets. Handled here so a half-word access is decoded once
+    // rather than per byte lane.
+    if (addr >= kGeoBase && addr < kGeoBase + 0x4000)
+        return static_cast<std::uint16_t>(m_geometry.geo_read(addr - kGeoBase) & 0xffff);
+
     // Luma RAM: one byte per address step, returned in the low lane.
     std::size_t luma_idx = 0, luma_entries = 0;
     if (luma_index(addr, luma_idx, luma_entries))
@@ -730,6 +746,11 @@ std::uint16_t Bus::read16(std::uint32_t addr) const {
 std::uint32_t Bus::read32(std::uint32_t addr) const {
     watch_log('R', addr, 0);
     if (m_trace) ++m_read_hist[addr & 0xfffc0000];
+
+    // GEO function ports (MAME geo_r): 0x2008 is the write pointer the i960
+    // polls to track display-list progress; 0x3008 is the read pointer.
+    if (addr >= kGeoBase && addr < kGeoBase + 0x4000)
+        return m_geometry.geo_read(addr - kGeoBase);
 
     // Luma RAM: a 32-bit access covers `entries` packed bytes, one per 16-bit
     // half-word on Model 2B or one per 32-bit word on Model 2A.
