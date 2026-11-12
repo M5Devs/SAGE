@@ -310,7 +310,8 @@ void Bus::attach(const RomLoader& roms, std::string_view game) {
     if (const Region* poly = roms.region("polygons"))
         m_geometry.set_polygon_rom(poly->data.data(), poly->data.size());
     m_geometry.set_texture_ram(reinterpret_cast<std::uint32_t*>(m_textureram0.data()),
-                               reinterpret_cast<std::uint32_t*>(m_textureram1.data()));
+                               reinterpret_cast<std::uint32_t*>(m_textureram1.data()),
+                               m_textureram0.size() / 4);
     m_geometry.set_luma_ram(m_luma.data());
     m_geometry.set_palette_ram(m_video.palram().data(), m_video.colorxlat().data());
     m_video.set_geometry(&m_geometry);

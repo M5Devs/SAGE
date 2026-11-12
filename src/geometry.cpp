@@ -176,9 +176,10 @@ void Geometry::set_polygon_rom(const std::uint8_t* data, std::size_t bytes) {
     m_polygon_rom_mask = static_cast<u32>(bytes / 4) - 1;
 }
 
-void Geometry::set_texture_ram(std::uint32_t* ram0, std::uint32_t* ram1) {
+void Geometry::set_texture_ram(std::uint32_t* ram0, std::uint32_t* ram1, std::size_t words) {
     m_textureram0 = ram0;
     m_textureram1 = ram1;
+    m_texture_words = words;
 }
 
 void Geometry::set_luma_ram(const std::uint8_t* data) { m_lumaram = data; }
@@ -262,6 +263,22 @@ void Geometry::push_geo_data(u32 data) {
     m_bufferram[idx] = data;
     m_geo_write_addr += 4;
 }
+std::size_t Geometry::geo_words_left(const u32* p) const {
+    if (!m_bufferram || !p || p < m_bufferram || p > m_bufferram + m_bufferram_words)
+        return 0;
+    return static_cast<std::size_t>((m_bufferram + m_bufferram_words) - p);
+}
+const u16* Geometry::tex_source(u32 sel, std::size_t& words) const {
+    if (sel & 0x800000) {
+        words = m_texture_ram.size();
+        return m_texture_ram.data();
+    }
+    words = m_texture_rom ? (m_texture_rom_mask + 1) : 0;
+    return m_texture_rom;
+}
+u16 Geometry::tex_read(const u16* base, std::size_t words, std::size_t index) const {
+    return (base && index < words) ? base[index] : 0u;
+}
 
 // ---------------------------------------------------------------------------
 // Geometry engine: display-list commands (model2_v.cpp)
@@ -279,26 +296,45 @@ const u32* Geometry::cmd_object_data(u32 opcode, const u32* input) {
     u32 obc = *input++;
 
     const u32* obp;
+    std::size_t obp_words;
     push(opcode >> 23);
     push(tpa);
     push(tha);
 
-    if (oba & 0x01000000)
-        obp = m_polygon_ram1.data() + (oba & 0x7fff);
-    else if (oba & 0x00800000)
-        obp = m_polygon_rom + (oba & m_polygon_rom_mask);
-    else
-        obp = m_polygon_ram0.data() + (oba & 0x7fff);
+    if (oba & 0x01000000) {
+        const std::size_t off = oba & 0x7fff;
+        obp = m_polygon_ram1.data() + off;
+        obp_words = m_polygon_ram1.size() - off;
+    } else if (oba & 0x00800000) {
+        const std::size_t off = oba & m_polygon_rom_mask;
+        obp = m_polygon_rom + off;
+        obp_words = m_polygon_rom ? (m_polygon_rom_mask + 1) - off : 0;
+    } else {
+        const std::size_t off = oba & 0x7fff;
+        obp = m_polygon_ram0.data() + off;
+        obp_words = m_polygon_ram0.size() - off;
+    }
 
     if (obc == 0)
         obc = 0xfffff;
 
+    // The parsers read a 6-word header then up to 10 words per vertex with no
+    // bound of their own (matching the reference). A desynced display list can
+    // otherwise drive them past the end of the polygon RAM/ROM, so cap the
+    // vertex count to what the region can actually hold.
+    constexpr std::size_t kHeaderWords = 6;
+    constexpr std::size_t kMaxVertexWords = 10;
+    if (obp_words >= kHeaderWords) {
+        const std::size_t max_vertices = (obp_words - kHeaderWords) / kMaxVertexWords;
+        if (obc > max_vertices)
+            obc = static_cast<u32>(max_vertices);
 
-    switch (m_mode & 3) {
-        case 0: parse_np_ns(obp, obc); break;
-        case 1: parse_np_s(obp, obc); break;
-        case 2: parse_nn_ns(obp, obc); break;
-        case 3: parse_nn_s(obp, obc); break;
+        switch (m_mode & 3) {
+            case 0: parse_np_ns(obp, obc); break;
+            case 1: parse_np_s(obp, obc); break;
+            case 2: parse_nn_ns(obp, obc); break;
+            case 3: parse_nn_s(obp, obc); break;
+        }
     }
     return input;
 }
@@ -317,7 +353,8 @@ const u32* Geometry::cmd_direct_data(u32 opcode, const u32* input) {
     push((*input++) >> 8);
 
     u32 attr;
-    while (((attr = *input++) & 3) != 0) {
+    const u32* const end = m_bufferram + m_bufferram_words;
+    while (input < end && ((attr = *input++) & 3) != 0) {
         push(attr & 0x00ffffff);
         push((*input++) >> 8);
         push((*input++) >> 8);
@@ -349,7 +386,10 @@ const u32* Geometry::cmd_window_data(u32 opcode, const u32* input) {
 const u32* Geometry::cmd_texture_data(u32 opcode, const u32* input) {
     push(opcode >> 23);
     push(*input++);
-    const u32 count = *input++;
+    u32 count = *input++;
+    const std::size_t left = geo_words_left(input);
+    if (count > left)
+        count = static_cast<u32>(left);
     push(count);
     for (u32 i = 0; i < count; i++)
         push(*input++);
@@ -359,12 +399,17 @@ const u32* Geometry::cmd_texture_data(u32 opcode, const u32* input) {
 const u32* Geometry::cmd_polygon_data(u32 opcode, const u32* input) {
     (void)opcode;
     const u32 address = *input++;
-    u32* p;
-    if (address & 0x01000000)
-        p = m_polygon_ram1.data() + (address & 0x7fff);
-    else
-        p = m_polygon_ram0.data() + (address & 0x7fff);
-    const u32 count = *input++;
+    const bool fast = (address & 0x01000000) != 0;
+    const std::size_t off = address & 0x7fff;
+    u32* const ram = fast ? m_polygon_ram1.data() : m_polygon_ram0.data();
+    const std::size_t ram_words = fast ? m_polygon_ram1.size() : m_polygon_ram0.size();
+    u32* p = ram + (off < ram_words ? off : 0);
+    u32 count = *input++;
+    // Bound by both the source (buffer RAM) and the destination (polygon RAM);
+    // a desynced list can otherwise write past the end of the RAM vectors.
+    const std::size_t left = std::min(geo_words_left(input), ram_words - (off < ram_words ? off : 0));
+    if (count > left)
+        count = static_cast<u32>(left);
     for (u32 i = 0; i < count; i++)
         *p++ = *input++;
     return input;
@@ -372,8 +417,11 @@ const u32* Geometry::cmd_polygon_data(u32 opcode, const u32* input) {
 
 const u32* Geometry::cmd_texture_parameters(u32 opcode, const u32* input) {
     (void)opcode;
-    u32 index = (*input++) >> 2;
-    const u32 count = *input++;
+    u32 index = ((*input++) >> 2) & 0x1f;  // 32-entry tables; a desynced list must not over-index
+    u32 count = *input++;
+    const std::size_t left = geo_words_left(input) / 2;  // two words per entry
+    if (count > left)
+        count = static_cast<u32>(left);
     for (u32 i = 0; i < count; i++) {
         const u32 param = *input++;
         m_texture_parameters[index].diffuse = static_cast<float>(param & 0xff);
@@ -463,7 +511,10 @@ const u32* Geometry::cmd_dummy(u32 opcode, const u32* input) {
 const u32* Geometry::cmd_log_data(u32 opcode, const u32* input) {
     push(opcode >> 23);
     push(*input++);
-    const u32 count = *input++;
+    u32 count = *input++;
+    const std::size_t left = geo_words_left(input);
+    if (count > left)
+        count = static_cast<u32>(left);
     push(count << 2);
     for (u32 i = 0; i < count; i++) {
         const u32 data = *input++;
@@ -484,7 +535,10 @@ const u32* Geometry::cmd_lod(u32 opcode, const u32* input) {
 const u32* Geometry::cmd_code_upload(u32 opcode, const u32* input) {
     (void)opcode;
     input++;  // flags
-    const u32 count = *input++;
+    u32 count = *input++;
+    const std::size_t left = geo_words_left(input) / 3;  // three words per entry
+    if (count > left)
+        count = static_cast<u32>(left);
     for (u32 i = 0; i < count; i++)
         input += 3;
     return input;
@@ -1165,35 +1219,31 @@ void Geometry::process_polygon(u32 attr) {
     if constexpr (NumVerts == 4)
         if (object.v[3].pz() > max_z) max_z = object.v[3].pz();
 
-    const u16* tp;
-    if (m_command_buffer[0] & 0x800000)
-        tp = &m_texture_ram[m_command_buffer[0] & 0xffff];
-    else
-        tp = &m_texture_rom[m_command_buffer[0] & m_texture_rom_mask];
+    std::size_t tp_words = 0;
+    const u16* tp_base = tex_source(m_command_buffer[0], tp_words);
+    std::size_t tp_index = m_command_buffer[0] & 0xffff;
 
-    object.v[0].pv() = *tp++;
-    object.v[0].pu() = *tp++;
-    object.v[1].pv() = *tp++;
-    object.v[1].pu() = *tp++;
-    object.v[2].pv() = *tp++;
-    object.v[2].pu() = *tp++;
+    object.v[0].pv() = tex_read(tp_base, tp_words, tp_index++);
+    object.v[0].pu() = tex_read(tp_base, tp_words, tp_index++);
+    object.v[1].pv() = tex_read(tp_base, tp_words, tp_index++);
+    object.v[1].pu() = tex_read(tp_base, tp_words, tp_index++);
+    object.v[2].pv() = tex_read(tp_base, tp_words, tp_index++);
+    object.v[2].pu() = tex_read(tp_base, tp_words, tp_index++);
     if constexpr (NumVerts == 4) {
-        object.v[3].pv() = *tp++;
-        object.v[3].pu() = *tp++;
+        object.v[3].pv() = tex_read(tp_base, tp_words, tp_index++);
+        object.v[3].pu() = tex_read(tp_base, tp_words, tp_index++);
     }
 
     m_command_buffer[0] += NumVerts * 2;
 
-    const u16* th;
-    if (m_command_buffer[1] & 0x800000)
-        th = &m_texture_ram[m_command_buffer[1] & 0xffff];
-    else
-        th = &m_texture_rom[m_command_buffer[1] & m_texture_rom_mask];
+    std::size_t th_words = 0;
+    const u16* th_base = tex_source(m_command_buffer[1], th_words);
+    std::size_t th_index = m_command_buffer[1] & 0xffff;
 
-    object.texheader[0] = *th++;
-    object.texheader[1] = *th++;
-    object.texheader[2] = *th++;
-    object.texheader[3] = *th++;
+    object.texheader[0] = tex_read(th_base, th_words, th_index++);
+    object.texheader[1] = tex_read(th_base, th_words, th_index++);
+    object.texheader[2] = tex_read(th_base, th_words, th_index++);
+    object.texheader[3] = tex_read(th_base, th_words, th_index++);
 
     const s32 tho = sext(attr >> 12, 5);
     m_command_buffer[1] += static_cast<u32>(tho * 4);
@@ -1226,11 +1276,13 @@ void Geometry::process_polygon(u32 attr) {
                 verts_in[j] = verts_out[j];
         }
 
-        if (clipped_verts > 2) {
+        // MAME aborts the frame when the polygon pool is exhausted; the reference
+        // drops the remaining polygons instead. Either way the slot must NOT be
+        // reused: wrapping the index relinks a polygon that is still in
+        // m_poly_sorted_list, which builds a cycle the renderer never escapes.
+        if (clipped_verts > 2 && m_poly_list_index < m_poly_list.size()) {
             object.z = float_to_zval(zvalue, m_z_adjust);
             Polygon* const zpoly = m_poly_sorted_list[object.z];
-            if (m_poly_list_index >= m_poly_list.size())
-                m_poly_list_index = 0;
             Polygon& poly = m_poly_list[m_poly_list_index++];
 
             poly.z = object.z;
@@ -1634,7 +1686,8 @@ u16 Geometry::get_texel(u32 base_x, u32 base_y, int x, int y, const u32* sheet) 
         y2 ^= 1024;
     }
     const u32 offset = static_cast<u32>((y2 / 2) * 512 + (x2 / 2));
-    u32 texel = sheet[offset >> 1];
+    const u32 index = offset >> 1;
+    u32 texel = index < m_texture_words ? sheet[index] : 0u;
     if (offset & 1)
         texel >>= 16;
     if ((y & 1) == 0)

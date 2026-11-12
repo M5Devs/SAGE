@@ -132,7 +132,7 @@ public:
     // ---- Shared resources (wired by the bus once the ROMs are loaded) -----
     void set_texture_rom(const std::uint8_t* data, std::size_t bytes);
     void set_polygon_rom(const std::uint8_t* data, std::size_t bytes);
-    void set_texture_ram(std::uint32_t* ram0, std::uint32_t* ram1);
+    void set_texture_ram(std::uint32_t* ram0, std::uint32_t* ram1, std::size_t words);
     void set_luma_ram(const std::uint8_t* data);
     void set_palette_ram(const std::uint8_t* palram, const std::uint8_t* colorxlat);
     void set_buffer_ram(std::uint32_t* words, std::size_t word_count);
@@ -201,9 +201,18 @@ private:
     static std::int32_t clip_polygon(Vertex* v, std::int32_t num_vertices, Vertex* vout,
                                      Plane clip_plane);
     void push_geo_data(std::uint32_t data);
+    // Words left in buffer RAM from `p` to the end (0 if `p` is out of range).
+    // A desynced display list can otherwise drive a count-driven reader past the
+    // buffer; the parse loop bound alone does not cover the readers themselves.
+    std::size_t geo_words_left(const std::uint32_t* p) const;
     bool check_culling(std::uint32_t attr, float min_z, float max_z) const;
     std::uint16_t get_texel(std::uint32_t base_x, std::uint32_t base_y, int x, int y,
                             const std::uint32_t* sheet) const;
+    // Selects the texture source for a command-buffer selector and reports its
+    // word count. `tex_read` returns 0 past the end, mirroring the reference's
+    // guarded get_texel: a desynced display list must not read past the sheet.
+    const std::uint16_t* tex_source(std::uint32_t sel, std::size_t& words) const;
+    std::uint16_t tex_read(const std::uint16_t* base, std::size_t words, std::size_t index) const;
     template <bool Translucent>
     std::uint32_t fetch_bilinear_texel(const Polygon& poly, std::int32_t miplevel,
                                        std::int32_t u, std::int32_t v) const;
@@ -259,6 +268,7 @@ private:
     // Shared video RAM.
     std::uint32_t* m_textureram0 = nullptr;
     std::uint32_t* m_textureram1 = nullptr;
+    std::size_t m_texture_words = 0;
     const std::uint8_t* m_lumaram = nullptr;
     const std::uint8_t* m_palram = nullptr;
     const std::uint8_t* m_colorxlat = nullptr;
