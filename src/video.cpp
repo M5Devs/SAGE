@@ -185,8 +185,14 @@ void Video::draw_tile_layers(int group) {
         if (vscr_reg & 0x8000)  // layer disabled
             continue;
         const std::uint16_t hscr_reg = rd16(m_tile, (0x5000 + layer) * 2);
-        const int hscr = (-static_cast<int>(hscr_reg)) & 0x1ff;
-        const int vscr = static_cast<int>(vscr_reg) & 0x1ff;
+        // segaic24 blits each tilemap at (-hscr, +vscr), i.e. source = screen +
+        // scroll. This loop runs the other way (screen = source + scroll), so
+        // both registers are negated relative to MAME here. Leaving vscr
+        // un-negated sampled Virtua Fighter 2's title backdrop (layer 2,
+        // vscr=0x56) 0x56 rows too low, showing a grey bar of bare ground tiles
+        // across the top 86 rows where the sky should be.
+        const int hscr = static_cast<int>(hscr_reg) & 0x1ff;
+        const int vscr = (-static_cast<int>(vscr_reg)) & 0x1ff;
 
         for (int ty = 0; ty < kTilemapDim; ++ty) {
             for (int tx = 0; tx < kTilemapDim; ++tx) {
