@@ -1092,8 +1092,12 @@ void Bus::trigger_vblank() {
     m_framenum++;
     ++m_vblank_count;
 
-    // MAME's screen_vblank() parses the geometry display list each vblank.
-    m_geometry.parse();
+    // MAME's screen_vblank(): "if 60 Hz mode or frame number is even, trigger
+    // geometrizer to start new frame". Video control bit 0 selects 30 Hz
+    // geometry, which runs on even frames only; the renderer then presents the
+    // previous result again.
+    if ((m_videoctl & 1) == 0 || (m_framenum & 1) == 0)
+        m_geometry.parse();
 
     const std::uint32_t line = 1u << 0;
     if (m_intena & line) {
