@@ -112,3 +112,27 @@ Model 2B / DOA (all fixed, verified):
   polygons reach the rasteriser (~95k dest px at frame 1200). Solid shading
   `draw_scanline_solid` looks up `colorxlat`/`palram` (colorbase) that vf2 has not
   populated — the next 3D-render gate.
+
+## vf2 geometry stall + display-list memory safety (33aa5cc)
+- **Frame ~1650 stall**: `Geometry` polygon pool (`m_poly_list`, 32768) index
+  `m_poly_list_index` wrapped to 0 on exhaustion, reusing a slot still linked in
+  `m_poly_sorted_list` → cyclic list → `render_polygons` never exits. Fix: never
+  reuse the slot; drop remaining polygons once full (reference/MAME drop too).
+- **Root cause underneath was a desynced display list.** Removing the wrap
+  exposed SIGSEGVs: the count-driven readers and polygon parsers read with no
+  bound, walking off buffer RAM / polygon RAM+ROM / texture sheets. Found with
+  ASan (`build-asan`, `ASAN_OPTIONS=detect_leaks=0:abort_on_error=0`).
+- Fixes in `src/geometry.cpp` + `include/sage/geometry.h`: `geo_words_left(p)`
+  clamps `cmd_log_data`/`cmd_texture_data`/`cmd_texture_parameters`/
+  `cmd_polygon_data`/`cmd_code_upload` to remaining buffer-RAM words;
+  `cmd_polygon_data` also clamps to destination polygon RAM; `cmd_direct_data`
+  stops at buffer-RAM end; `cmd_texture_parameters` masks index to 0x1f;
+  `cmd_object_data` caps `obc` to `(region_words-6)/10`; `process_polygon` +
+  `get_texel` read textures via `tex_source`/`tex_read` (0 past end, mirrors the
+  reference's guarded `get_texel`). `set_texture_ram` now takes a word count.
+- **Verify**: `./build/sage roms/vf2.zip vf2 N`. 12000 frames rc=0 (~160 s);
+  ASan clean to 6000 frames; 36/36 ICs still verify. Release-only crashes (ASan
+  clean) were the unmasked `cmd_texture_parameters` index and the unbounded
+  parser vertex count — Release has no redzone to trip on first.
+- Debug aid: `gdb -q -batch -ex run -ex bt --args ./build/sage roms/vf2.zip vf2 N`
+  (release bt is enough to name the crashing command handler).
