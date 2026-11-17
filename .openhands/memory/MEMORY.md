@@ -136,3 +136,21 @@ Model 2B / DOA (all fixed, verified):
   parser vertex count — Release has no redzone to trip on first.
 - Debug aid: `gdb -q -batch -ex run -ex bt --args ./build/sage roms/vf2.zip vf2 N`
   (release bt is enough to name the crashing command handler).
+
+## Model 2 texture index mask (commit 5b46bfc)
+- `Geometry::process_polygon` must mask the texture index **per source path**:
+  `& 0xffff` for texture RAM (bit 0x800000 set), `& m_texture_rom_mask` for
+  texture ROM. MAME `model2_v.cpp:382-407` does exactly this. Commit 33aa5cc
+  collapsed both to `& 0xffff`, aliasing DOA's 8 MiB texture ROM to its low
+  64 KiB → corrupt texheader → **bright-green smears / giant green box / hollow
+  ghost**. Fixed in 5b46bfc (restores byte-identical output to last-good 5fe6095).
+- MAME's opaque rasteriser (`model2rd.ipp draw_scanline_tex`) has **no** pen-0
+  discard; only the `Translucent` path discards (alpha < 50%). SAGE's
+  `if (t == 0) continue;` is harmless-but-non-MAME and is NOT the green cause.
+- `mask_base = (layer>=2) ? 0x6800 : 0x6000` in `video.cpp` is MAME-correct
+  (segaic24 `layer & 4`, called with `layer<<1`). Reverting it to `0x6000` makes
+  DOA f200-1000 render a **black** frame; it is a no-op at f1200/1500.
+- Regression bisect tip: `git checkout <c> -- src/` does NOT produce a clean
+  build (leaves newer files). Use `git worktree add --detach <dir> <c>` + symlink
+  the gitignored `roms/` into it. Screenshots: 496x384, plain PIL ppm→png;
+  DOA f1200 = sky (0.26% green good), f1500 = Kasumi/combat (0.00% green good).
