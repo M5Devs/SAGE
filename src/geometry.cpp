@@ -1221,7 +1221,8 @@ void Geometry::process_polygon(u32 attr) {
 
     std::size_t tp_words = 0;
     const u16* tp_base = tex_source(m_command_buffer[0], tp_words);
-    std::size_t tp_index = m_command_buffer[0] & 0xffff;
+    std::size_t tp_index = (m_command_buffer[0] & 0x800000)
+        ? (m_command_buffer[0] & 0xffff) : (m_command_buffer[0] & m_texture_rom_mask);
 
     object.v[0].pv() = tex_read(tp_base, tp_words, tp_index++);
     object.v[0].pu() = tex_read(tp_base, tp_words, tp_index++);
@@ -1238,7 +1239,8 @@ void Geometry::process_polygon(u32 attr) {
 
     std::size_t th_words = 0;
     const u16* th_base = tex_source(m_command_buffer[1], th_words);
-    std::size_t th_index = m_command_buffer[1] & 0xffff;
+    std::size_t th_index = (m_command_buffer[1] & 0x800000)
+        ? (m_command_buffer[1] & 0xffff) : (m_command_buffer[1] & m_texture_rom_mask);
 
     object.texheader[0] = tex_read(th_base, th_words, th_index++);
     object.texheader[1] = tex_read(th_base, th_words, th_index++);
