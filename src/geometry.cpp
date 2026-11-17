@@ -1369,9 +1369,20 @@ void Geometry::render_frame_start() {
     std::fill(m_poly_sorted_list.begin(), m_poly_sorted_list.end(), nullptr);
     m_min_z = 0xffff;
     m_max_z = 0;
+    // Reset polygon_z to a large sentinel so backgrounds using "previous z"
+    // mode (which inherit the last written z value) land at the far end of the
+    // depth sort instead of z=0.  With z=0 they would sort in front of every
+    // other polygon and produce the coloured garbage overlays visible in the
+    // DOA sky and stage backgrounds (matches Keisho render_frame_start and
+    // MAME raster_state init).
     m_polygon_z = 1e10f;
     m_cur_window = 0;
     m_render_done = false;
+    // Clear the fill mask so stale rasterised pixels from the previous frame
+    // cannot bleed through transparent regions of the new frame.  MAME resets
+    // its fillmap implicitly via bitmap_ind8::fill() at the top of
+    // screen_update(); we must do the same here.
+    std::fill(m_fill.begin(), m_fill.end(), std::uint8_t{0});
 }
 
 void Geometry::project(Polygon& poly) {

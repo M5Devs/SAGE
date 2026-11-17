@@ -179,18 +179,30 @@ void Video::draw_tile_layers(int group) {
     for (int idx = 0; idx < 4; ++idx) {
         const int layer = kOrder[idx];
         const bool opaque = (layer >= 2) && !sprite_pass;
-        const int mask_base = 0x6000;  // MAME: tile_ram + (layer & 4 ? 0x6800 : 0x6000)
+        // MAME draw_common receives (layer_index << 1) and computes:
+        //   mask = tile_ram + (layer & 4 ? 0x6800 : 0x6000)
+        // SAGE layer indices 0–3 correspond to MAME (layer<<1) values 0,2,4,6.
+        // Indices 2 and 3 → MAME values 4 and 6 → (val & 4) != 0 → 0x6800.
+        // Indices 0 and 1 → MAME values 0 and 2 → (val & 4) == 0 → 0x6000.
+        const int mask_base = (layer >= 2) ? 0x6800 : 0x6000;
 
         const std::uint16_t vscr_reg = rd16(m_tile, (0x5004 + layer) * 2);
         if (vscr_reg & 0x8000)  // layer disabled
             continue;
         const std::uint16_t hscr_reg = rd16(m_tile, (0x5000 + layer) * 2);
-        // segaic24 blits each tilemap at (-hscr, +vscr), i.e. source = screen +
-        // scroll. This loop runs the other way (screen = source + scroll), so
-        // both registers are negated relative to MAME here. Leaving vscr
-        // un-negated sampled Virtua Fighter 2's title backdrop (layer 2,
-        // vscr=0x56) 0x56 rows too low, showing a grey bar of bare ground tiles
-        // across the top 86 rows where the sky should be.
+        // MAME segaic24 draw_common (non-row-scroll path, line 484-485):
+        //   hscr = (-hscr_reg) & 0x1ff   ← negated, used as SOURCE x in tilemap
+        //   vscr = (+vscr_reg) & 0x1ff   ← not negated, used as SOURCE y
+        // draw_rect then copies tilemap[sy + screen_y][sx + screen_x] → screen.
+        // This loop is the inverse: for each tilemap tile (tx,ty) it computes
+        // the screen destination as:
+        //   mx = (tx*8 + px + hscr) & 0x1ff
+        //   my = (ty*8 + py + vscr) & 0x1ff
+        // Matching MAME's screen_x = tile_x - (-hscr_reg) = tile_x + hscr_reg,
+        // screen_y = tile_y - (+vscr_reg), so:
+        //   hscr = +hscr_reg  (no negation needed)
+        //   vscr = -vscr_reg  (negated)
+        // These signs are CORRECT and must not be changed.
         const int hscr = static_cast<int>(hscr_reg) & 0x1ff;
         const int vscr = (-static_cast<int>(vscr_reg)) & 0x1ff;
 
