@@ -189,8 +189,9 @@ void patch_wav_sizes(std::FILE* f, std::uint64_t data_bytes) {
 int main(int argc, char** argv) {
     const std::string zip_path = (argc > 1) ? argv[1] : "roms/doa.zip";
     const std::string game = (argc > 2) ? argv[2] : "doa";
-    const std::string target = (game == "vf2") ? "Virtua Fighter 2 - Sega Model 2A"
-                                               : "Dead or Alive - Sega Model 2B";
+    const std::string target = (game == "vf2")     ? "Virtua Fighter 2 - Sega Model 2A"
+                             : (game == "daytona") ? "Daytona USA - Sega Model 2"
+                                                   : "Dead or Alive - Sega Model 2B";
     print_banner(target);
 
     const long frames = (argc > 3) ? std::atol(argv[3]) : 0;

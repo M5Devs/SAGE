@@ -142,6 +142,59 @@ constexpr Entry kDoaProgramDoab[] = {
     {R_MAINCPU, EntryKind::Load, "epr-19380b.16", 0x00000002, 0x00080000, 0x766C1EC8, 0x00000000, 2, 2, false, 0},
 };
 
+// --- Daytona USA (Model 2, original board) ---------------------------------
+
+constexpr RegionDef kDaytonaRegions[] = {
+    {"maincpu", 0x00200000, 8, false, 0x00},
+    {"main_data", 0x02000000, 32, false, 0x00},
+    {"polygons", 0x01000000, 32, false, 0x00},
+    {"textures", 0x01000000, 16, false, 0xFF},
+    {"copro_data", 0x00800000, 32, false, 0x00},
+    {"audiocpu", 0x00080000, 8, false, 0x00},
+    {"samples", 0x00800000, 16, true, 0x00},
+};
+
+constexpr Entry kDaytonaProgram[] = {
+    {R_MAINCPU, EntryKind::Load, "epr-16722a.12", 0x000000, 0x020000, 0x48B94318, 0x00000000, 2, 2, false, 0},
+    {R_MAINCPU, EntryKind::Load, "epr-16723a.13", 0x000002, 0x020000, 0x8AF8B32D, 0x00000000, 2, 2, false, 0},
+};
+
+constexpr Entry kDaytonaSharedEntries[] = {
+    // main_data: the i960 sees this at 0x02000000.
+    {R_MAIN_DATA, EntryKind::Load, "mpr-16528.10", 0x000000, 0x200000, 0x9CE591F6, 0x00000000, 2, 2, false, 0},
+    {R_MAIN_DATA, EntryKind::Load, "mpr-16529.11", 0x000002, 0x200000, 0xF7095EAF, 0x00000000, 2, 2, false, 0},
+    {R_MAIN_DATA, EntryKind::Load, "mpr-16808.8",   0x400000, 0x200000, 0x44F1F5A0, 0x00000000, 2, 2, false, 0},
+    {R_MAIN_DATA, EntryKind::Load, "mpr-16809.9",   0x400002, 0x200000, 0x37A2DD12, 0x00000000, 2, 2, false, 0},
+    {R_MAIN_DATA, EntryKind::Load, "epr-16724a.6",  0x800000, 0x080000, 0x469F10FD, 0x00000000, 2, 2, false, 0},
+    {R_MAIN_DATA, EntryKind::Load, "epr-16725a.7",  0x800002, 0x080000, 0xBA0DF8DB, 0x00000000, 2, 2, false, 0},
+
+    // Model geometry, read by the geometry engine.
+    {R_POLYGONS, EntryKind::Load, "mpr-16523.ic16", 0x000000, 0x200000, 0x2F484D42, 0x00000000, 2, 2, false, 0},
+    {R_POLYGONS, EntryKind::Load, "mpr-16518.ic20", 0x000002, 0x200000, 0xDF683BF7, 0x00000000, 2, 2, false, 0},
+    {R_POLYGONS, EntryKind::Load, "mpr-16524.ic17", 0x400000, 0x200000, 0x34658BD7, 0x00000000, 2, 2, false, 0},
+    {R_POLYGONS, EntryKind::Load, "mpr-16519.ic21", 0x400002, 0x200000, 0xFACD1C81, 0x00000000, 2, 2, false, 0},
+    {R_POLYGONS, EntryKind::Load, "mpr-16525.ic18", 0x800000, 0x200000, 0xFB517521, 0x00000000, 2, 2, false, 0},
+    {R_POLYGONS, EntryKind::Load, "mpr-16520.ic22", 0x800002, 0x200000, 0xD66BD9BD, 0x00000000, 2, 2, false, 0},
+    {R_POLYGONS, EntryKind::Load, "mpr-16772.ic19", 0xC00000, 0x200000, 0x770ED912, 0x00000000, 2, 2, false, 0},
+    {R_POLYGONS, EntryKind::Load, "mpr-16771.ic23", 0xC00002, 0x200000, 0xA2205124, 0x00000000, 2, 2, false, 0},
+
+    // Texture headers / UV lists.
+    {R_TEXTURES, EntryKind::Load, "mpr-16522.25", 0x000000, 0x200000, 0x55D39A57, 0x00000000, 2, 2, false, 0},
+    {R_TEXTURES, EntryKind::Load, "mpr-16521.24", 0x000002, 0x200000, 0xAF1934FB, 0x00000000, 2, 2, false, 0},
+    {R_TEXTURES, EntryKind::Load, "mpr-16770.27", 0x800000, 0x200000, 0xF9FA7BFB, 0x00000000, 2, 2, false, 0},
+    {R_TEXTURES, EntryKind::Load, "mpr-16769.26", 0x800002, 0x200000, 0xE57429E9, 0x00000000, 2, 2, false, 0},
+
+    // 68000 sound program (big-endian, hence the byte swap).
+    {R_AUDIOCPU, EntryKind::Load, "epr-16720.7", 0x000000, 0x020000, 0x8E73CFFD, 0x00000000, 2, 0, true, 0},
+    {R_AUDIOCPU, EntryKind::Load, "epr-16721.8", 0x020000, 0x020000, 0x1BB3B7B7, 0x00000000, 2, 0, true, 0},
+
+    // SCSP PCM samples.
+    {R_SAMPLES, EntryKind::Load, "mpr-16491.32", 0x000000, 0x200000, 0x89920903, 0x00000000, 2, 0, true, 0},
+    {R_SAMPLES, EntryKind::Load, "mpr-16492.33", 0x200000, 0x200000, 0x459E701B, 0x00000000, 2, 0, true, 0},
+    {R_SAMPLES, EntryKind::Load, "mpr-16493.4",  0x400000, 0x200000, 0x9990DB15, 0x00000000, 2, 0, true, 0},
+    {R_SAMPLES, EntryKind::Load, "mpr-16494.5",  0x600000, 0x200000, 0x600E1D6C, 0x00000000, 2, 0, true, 0},
+};
+
 // --- Virtua Fighter 2 (Model 2A) ------------------------------------------
 
 constexpr RegionDef kVf2Regions[] = {
@@ -320,6 +373,13 @@ bool RomLoader::load(std::string_view zip_path, std::string_view game) {
         report_.game = "Virtua Fighter 2";
         report_.hardware = "Sega Model 2A (i960 + TGP + 315-5645 + SCSP)";
         report_.revision = "Version 2.1";
+    } else if (game == "daytona") {
+        region_defs = kDaytonaRegions;
+        shared_entries = kDaytonaSharedEntries;
+        program = kDaytonaProgram;
+        report_.game = "Daytona USA";
+        report_.hardware = "Sega Model 2 (i960 + 315-5773 + SCSP)";
+        report_.revision = "Revision A";
     } else if (game == "doab") {
         region_defs = kDoaRegions;
         shared_entries = kDoaSharedEntries;

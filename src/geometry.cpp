@@ -1278,6 +1278,21 @@ void Geometry::process_polygon(u32 attr) {
                 verts_in[j] = verts_out[j];
         }
 
+        // Near-plane clip: reject any polygon with a vertex behind or at the
+        // camera plane. Without this, perspective division (x/pz, y/pz) in
+        // project() inverts negative/near-zero depths and projects massive
+        // warped polygons across the screen (VF2 blue diagonal wedge).
+        constexpr float kNearPlane = 0.1f;
+        bool any_behind = false;
+        for (s32 i = 0; i < clipped_verts; i++) {
+            if (verts_in[i].pz() < kNearPlane) {
+                any_behind = true;
+                break;
+            }
+        }
+        if (any_behind)
+            goto skip_polygon;
+
         // MAME aborts the frame when the polygon pool is exhausted; the reference
         // drops the remaining polygons instead. Either way the slot must NOT be
         // reused: wrapping the index relinks a polygon that is still in
@@ -1308,6 +1323,8 @@ void Geometry::process_polygon(u32 attr) {
             if (object.z > m_max_z) m_max_z = object.z;
         }
     }
+
+skip_polygon:
 
     switch ((attr >> 8) & 3) {
         case 0:
