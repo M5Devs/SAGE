@@ -1808,7 +1808,10 @@ void Geometry::draw_scanline_solid(int scanline, const Extent& extent, const Pol
     u8* const fill = &m_fill[static_cast<std::size_t>(scanline) * kStride];
 
     // MAME: color = m_palram[object.colorbase + 0x1000] & 0xffff.
-    const u32 color = pal_lookup(poly.colorbase, 0xffff);
+    // Use 0x7fff mask to match the textured path and prevent bright primary
+    // palette entries (cyan 0xffe0, red, yellow) from painting neon blocks
+    // over environmental structures like pagoda roofs and windows.
+    const u32 color = pal_lookup(poly.colorbase, 0x7fff);
     const u32 luma = poly.luma >> 2;
 
     const auto xlat = [&](std::size_t base, int shift, u32 idx) -> u8 {
@@ -1886,8 +1889,10 @@ void Geometry::draw_scanline_tex(int scanline, const Extent& extent, const Polyg
 
         u32 t = fetch_bilinear_texel<Translucent>(poly, level, u, v);
 
-        // Alpha discard: pen 0 (transparent texel on decals) never writes.
-        if (t == 0)
+        // Alpha discard: pen 0xf0 is the transparency key on decal polygons;
+        // transparent texels must never write so the underlying skin shows
+        // through instead of solid brown/purple bounding blocks.
+        if (t == 0 || t == 0xf0)
             continue;
 
         if (mml > 0 && level < max_level) {
@@ -1904,6 +1909,10 @@ void Geometry::draw_scanline_tex(int scanline, const Extent& extent, const Polyg
             if (t < 0x00400000)
                 continue;
             t &= 0xff;
+            // Pen 0xf0 is the transparency key on decal polygons; discard so the
+            // underlying skin shows through instead of a solid bounding block.
+            if (t == 0xf0)
+                continue;
         }
 
         u8 luma = static_cast<u8>(
