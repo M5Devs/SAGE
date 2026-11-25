@@ -1285,7 +1285,7 @@ void Geometry::process_polygon(u32 attr) {
         constexpr float kNearPlane = 0.1f;
         bool any_behind = false;
         for (s32 i = 0; i < clipped_verts; i++) {
-            if (verts_in[i].pz() < kNearPlane) {
+            if (verts_in[i].pz() <= kNearPlane) {
                 any_behind = true;
                 break;
             }
